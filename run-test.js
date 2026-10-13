@@ -1,78 +1,93 @@
+// Pengujian nyata AcademicVerifier di jaringan Hardhat in-process (EVM sungguhan).
+import hre from "hardhat";
 import { ethers } from "ethers";
-import fs from "fs";
-import path from "path";
 
-async function main() {
-  console.log("\n========================================================================");
-  console.log("  PENGUJIAN TRANSAKSI ETHEREUM (EVM) REAL - STANDALONE ENGINE");
-  console.log("  Environment : Hardhat EVM Artifacts / Local Ethers v6 Engine");
-  console.log("  Solidity    : v0.8.20 (solc 0.8.34)");
-  console.log("========================================================================\n");
-
-  // 1. Inisialisasi Mock EVM Accounts (Private Keys Resmi Hardhat)
-  const provider = new ethers.JsonRpcProvider(); // Mock Fallback Provider
-  const adminWallet = new ethers.Wallet("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80");
-  const issuerWallet = new ethers.Wallet("0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d");
-  const studentWallet = new ethers.Wallet("0x5de4111afa1a4b93a3d26fd50061e5651c6c59b207ed6b72d2be4162e249d0dd");
-  const attackerWallet = new ethers.Wallet("0x7c88215321a5330364e9e03d4081c7e28b26e6d302a9b40742f5052a386ec9f9");
-
-  console.log("  [+] Akun Admin    :", adminWallet.address);
-  console.log("  [+] Akun Issuer   :", issuerWallet.address);
-  console.log("  [+] Akun Student  :", studentWallet.address);
-  console.log("  [+] Akun Attacker :", attackerWallet.address);
-  console.log("------------------------------------------------------------------------\n");
-
-  // 2. Baca Artifact Kompilasi AcademicVerifier.sol
-  const artifactPath = path.resolve("./artifacts/contracts/AcademicVerifier.sol/AcademicVerifier.json");
-  if (!fs.existsSync(artifactPath)) {
-    console.log("--> Artifacts belum ditemukan. Memulai kompilasi...");
-  }
-
-  // 3. Simulasikan State Ledger & AccessControl Smart Contract
-  const contractAddress = ethers.getCreateAddress({
-    from: adminWallet.address,
-    nonce: 0
-  });
-  console.log(`--> Deploying AcademicVerifier.sol ke Local EVM Memory ... BERHASIL!\n    Alamat Kontrak: ${contractAddress}\n`);
-
-  const docHash = "0x1234567890123456789012345678901234567890123456789012345678901234";
-  const state = new Map();
-
-  // Test T-01
-  process.stdout.write("[TEST T-01] Memanggil issueCredential() via Issuer ... ");
-  const mockTxHash1 = ethers.keccak256(ethers.toUtf8Bytes("tx1_" + Date.now()));
-  state.set(docHash, { student: studentWallet.address, isValid: true });
-  console.log(`✔ LULUS (Tx Hash: ${mockTxHash1.substring(0, 22)}...)`);
-
-  // Test T-02
-  process.stdout.write("[TEST T-02] Memanggil verifyCredential() di EVM State ... ");
-  const cred = state.get(docHash);
-  const isValid = cred ? cred.isValid : false;
-  console.log(`✔ LULUS (Return value: ${isValid})`);
-
-  // Test T-03
-  process.stdout.write("[TEST T-03] Memanggil revokeCredential() oleh Admin ... ");
-  state.set(docHash, { ...cred, isValid: false });
-  const isValidAfterRevoke = state.get(docHash).isValid;
-  console.log(`✔ LULUS (Return value: ${isValidAfterRevoke})`);
-
-  // Test T-04
-  process.stdout.write("[TEST T-04] Attacker Memanggil issueCredential() ... ");
+const results = [];
+async function check(id, desc, fn) {
   try {
-    const callerRoleIsIssuer = false;
-    if (!callerRoleIsIssuer) {
-      throw new Error(`AccessControlUnauthorizedAccount("${attackerWallet.address}")`);
-    }
-  } catch (error) {
-    console.log("✔ LULUS (EVM Revert: AccessControlUnauthorizedAccount)");
+    const detail = await fn();
+    results.push({ id, ok: true });
+    console.log(`[${id}] ${desc} ... LULUS ${detail ? "(" + detail + ")" : ""}`);
+  } catch (e) {
+    results.push({ id, ok: false });
+    console.log(`[${id}] ${desc} ... GAGAL (${e.message})`);
   }
-
-  console.log("\n------------------------------------------------------------------------");
-  console.log("  HASIL PENGUJIAN EVM: 4 TRANSAKSI SUKSES (100% PASSED)");
-  console.log("------------------------------------------------------------------------\n");
+}
+// Pastikan transaksi benar-benar revert dengan pesan/error yang diharapkan.
+async function expectRevert(promise, expected, iface) {
+  try { await promise; } catch (e) {
+    let decoded = "";
+    const data = e.data || (e.info && e.info.error && e.info.error.data);
+    if (iface && typeof data === "string") { const pe = iface.parseError(data); if (pe) decoded = pe.name + "(" + pe.args.join(",") + ")"; }
+    const text = [decoded, e.message, e.reason, e.revert && e.revert.name, e.shortMessage].join(" | ");
+    if (text.includes(expected)) return decoded || expected;
+    throw new Error(`revert tidak sesuai, diharapkan "${expected}", dapat: ${text.slice(0, 160)}`);
+  }
+  throw new Error("transaksi seharusnya revert tetapi berhasil");
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+async function main() {
+  // Hardhat 3: sambungkan ke jaringan EDR in-process (EVM sungguhan). Jalankan `npx hardhat build` lebih dulu.
+  const conn = await hre.network.connect();
+  const provider = new ethers.BrowserProvider(conn.provider);
+  const net = await provider.getNetwork();
+  const [admin, issuer, student, attacker] = await Promise.all([0, 1, 2, 3].map((i) => provider.getSigner(i)));
+  console.log("Chain ID:", net.chainId.toString());
+  console.log("Admin:", admin.address, "\nIssuer:", issuer.address, "\nStudent:", student.address, "\nAttacker:", attacker.address, "\n");
+
+  const art = await hre.artifacts.readArtifact("AcademicVerifier");
+  const factory = new ethers.ContractFactory(art.abi, art.bytecode, admin);
+  const c = await factory.deploy();
+  const dRcpt = await c.deploymentTransaction().wait();
+  console.log("Deploy: alamat", await c.getAddress(), "| blok", dRcpt.blockNumber, "| gas", dRcpt.gasUsed.toString(), "\n");
+
+  const ISSUER_ROLE = await c.ISSUER_ROLE();
+  await (await c.grantRole(ISSUER_ROLE, issuer.address)).wait();
+  const docHash = ethers.keccak256(ethers.toUtf8Bytes("ijazah-sintetis-001"));
+
+  await check("T-01", "issueCredential() oleh Issuer", async () => {
+    const rc = await (await c.connect(issuer).issueCredential(docHash, student.address)).wait();
+    if (rc.status !== 1) throw new Error("status transaksi != 1");
+    const ev = rc.logs.map((l) => c.interface.parseLog(l)).find((l) => l && l.name === "CredentialIssued");
+    if (!ev || ev.args.docHash !== docHash || ev.args.student !== student.address) throw new Error("event CredentialIssued tidak sesuai");
+    const cred = await c.credentials(docHash);
+    if (!cred.isValid || cred.studentWallet !== student.address) throw new Error("state kredensial salah");
+    return `Tx ${rc.hash.slice(0, 18)}..., gas ${rc.gasUsed}`;
+  });
+  await check("T-02", "verifyCredential() pada hash aktif (dipanggil akun Attacker)", async () => {
+    const v = await c.connect(attacker).verifyCredential(docHash);
+    if (v !== true) throw new Error(`mengembalikan ${v}`);
+    return `return=${v}`;
+  });
+  await check("T-03", "revokeCredential() oleh Admin, lalu verifikasi ulang", async () => {
+    const rc = await (await c.connect(admin).revokeCredential(docHash)).wait();
+    const ev = rc.logs.map((l) => c.interface.parseLog(l)).find((l) => l && l.name === "CredentialRevoked");
+    if (!ev) throw new Error("event CredentialRevoked tidak ada");
+    const v = await c.verifyCredential(docHash);
+    if (v !== false) throw new Error("kredensial masih valid setelah dicabut");
+    return `Tx ${rc.hash.slice(0, 18)}..., verify=${v}`;
+  });
+  await check("T-04", "Attacker memanggil issueCredential() (harus revert)", () =>
+    expectRevert(c.connect(attacker).issueCredential(ethers.keccak256(ethers.toUtf8Bytes("palsu")), attacker.address), "AccessControlUnauthorizedAccount", c.interface));
+  await check("T-05", "Issue hash yang sama dua kali (harus revert)", () =>
+    expectRevert(c.connect(issuer).issueCredential(docHash, student.address), "Kredensial sudah terdaftar"));
+  await check("T-06", "verifyCredential() pada hash tidak terdaftar", async () => {
+    const u = await c.verifyCredential(ethers.keccak256(ethers.toUtf8Bytes("tidak-ada")));
+    if (u !== false) throw new Error(`mengembalikan ${u}`);
+    return `return=${u}`;
+  });
+  await check("T-07", "revokeCredential() pada hash tidak terdaftar (harus revert)", () =>
+    expectRevert(c.connect(admin).revokeCredential(ethers.keccak256(ethers.toUtf8Bytes("x"))), "Kredensial tidak ditemukan"));
+  await check("T-08", "Non-admin memanggil revokeCredential() (harus revert)", () =>
+    expectRevert(c.connect(issuer).revokeCredential(docHash), "AccessControlUnauthorizedAccount", c.interface));
+  await check("T-09", "Non-admin memanggil grantRole() (revert; peran tidak berubah)", async () => {
+    const r = await expectRevert(c.connect(attacker).grantRole(ISSUER_ROLE, attacker.address), "AccessControlUnauthorizedAccount", c.interface);
+    if (await c.hasRole(ISSUER_ROLE, attacker.address)) throw new Error("peran Attacker berubah");
+    return r.slice(0, 40) + "...; hasRole=false";
+  });
+
+  const pass = results.filter((r) => r.ok).length;
+  console.log(`\nHASIL: ${pass}/${results.length} lulus`);
+  if (pass !== results.length) process.exitCode = 1;
+}
+main().catch((e) => { console.error(e); process.exitCode = 1; });
