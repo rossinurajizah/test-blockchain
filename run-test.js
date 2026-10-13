@@ -85,7 +85,12 @@ async function main() {
     if (await c.hasRole(ISSUER_ROLE, attacker.address)) throw new Error("peran Attacker berubah");
     return r.slice(0, 40) + "...; hasRole=false";
   });
-
+  await check("T-10", "Issue ulang hash yang sudah dicabut (revert; status tetap tidak valid)", async () => {
+    const r = await expectRevert(c.connect(issuer).issueCredential(docHash, student.address), "Kredensial sudah terdaftar");
+    if ((await c.verifyCredential(docHash)) !== false) throw new Error("status berubah menjadi valid");
+    return r + "; verify=false";
+  });
+  
   const pass = results.filter((r) => r.ok).length;
   console.log(`\nHASIL: ${pass}/${results.length} lulus`);
   if (pass !== results.length) process.exitCode = 1;
